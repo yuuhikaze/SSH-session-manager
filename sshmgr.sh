@@ -3,10 +3,16 @@
 set -uo pipefail
 IFS=$'\n'
 
+NETWORK_INTERFACE=""
 INSTANCE=""
-ROUTE_THROUGH_PROXYCHAINS=false
+ROUTE_THROUGH_PROXYCHAINS=""
 SCRIPT_PATH=$(dirname "$(readlink -f "$0")")
 declare -A SERVER_LIST
+
+CONNECT=false
+DESCRIBE=false
+EXECUTE_CONVENIENCE=false
+COPY_PASSWORD=false
 
 exceptions() {
     throw_argument_exception() {
@@ -117,11 +123,7 @@ connect() {
             sleep 0.1 &&
             clear_screen
     ) &
-    if "$ROUTE_THROUGH_PROXYCHAINS"; then
-        proxychains ssh -p "${port:=22}" "$(get_field 2)@$(get_field 1)"
-    else
-        ssh -p "${port:=22}" "$(get_field 2)@$(get_field 1)"
-    fi
+    eval "${ROUTE_THROUGH_PROXYCHAINS:+proxychains}" ssh "$NETWORK_INTERFACE" -p "${port:=22}" "$(get_field 2)@$(get_field 1)"
 }
 
 describe_and_copy_ip() {
@@ -168,61 +170,46 @@ $(
             "-d | --describe" "Provides a description of selected instance" \
             "-d | --describe" "Provides a description of selected instance" \
             "-t | --execute-convenience" "Executes convenience of choice" \
+            "-i | --network-interface" "Routes SSH traffic through specified network interface name" \
             "-h | --help" "Shows this help message and exits"
     )
 EOF
 }
 
 parse_options() {
-    OPTS="$(getopt -o c,x,d,p,h,t -l route-through-proxy,connect,describe,password,execute-convenience,help -- "$@" 2> /dev/null)"
+    OPTS="$(getopt -o c,x,d,p,t,i:,h -l route-through-proxy,connect,describe,password,execute-convenience,network-interface:,debug,help -- "$@" 2> /dev/null)"
     [ $? -ne 0 ] && throw_option_exception
     eval set -- "$OPTS"
     while true; do
         case "$1" in
             -x | --connect-proxied)
+                CONNECT=true
                 ROUTE_THROUGH_PROXYCHAINS=true
-                load_server_data
-                select_instance &&
-                    connect
-                exit 0
+                shift
                 ;;
             -c | --connect)
-                load_server_data
-                select_instance &&
-                    connect
-                exit 0
+                CONNECT=true
+                shift
                 ;;
             -d | --describe)
-                load_server_data
-                select_instance &&
-                    describe_and_copy_ip
-                exit 0
+                DESCRIBE=true
+                shift
                 ;;
             -p | --password)
-                load_server_data
-                select_instance &&
-                    copy_password
-                exit 0
+                COPY_PASSWORD=true
+                shift
                 ;;
             -t | --execute-convenience)
-                conveniences="$(echo -e "Change prompt color\nEnter password\nEscalate to superuser" | nl | fzf -m --prompt "Choose a convencience to execute: " --with-nth 2..)"
-                mapfile -t conveniences_indices < <(awk '{print $1}' <<< "$conveniences")
-                for convenience_idx in "${conveniences_indices[@]}"; do
-                    case $convenience_idx in
-                        1) change_prompt_color "" ;;
-                        2)
-                            load_server_data
-                            select_instance &&
-                                enter_password "$(get_field 3)"
-                            ;;
-                        3)
-                            load_server_data
-                            select_instance &&
-                                escalate_to_superuser "$(get_field 3)"
-                            ;;
-                    esac
-                done
-                exit 0
+                EXECUTE_CONVENIENCE=true
+                shift
+                ;;
+            -i | --network-interface)
+                NETWORK_INTERFACE="-b $(ip -o -4 addr show dev "$2" | awk '{print $4}' | cut -d/ -f1)"
+                shift 2
+                ;;
+            --debug)
+                set -x
+                shift
                 ;;
             -h | --help)
                 documentation
@@ -238,3 +225,29 @@ parse_options() {
 }
 
 parse_options "$@"
+load_server_data
+if "$CONNECT"; then
+    select_instance && connect
+elif "$DESCRIBE"; then
+    select_instance && describe_and_copy_ip
+elif "$COPY_PASSWORD"; then
+    select_instance && copy_password
+elif "$EXECUTE_CONVENIENCE"; then
+    conveniences="$(echo -e "Change prompt color\nEnter password\nEscalate to superuser" | nl | fzf -m --prompt "Choose a convencience to execute: " --with-nth 2..)"
+    mapfile -t conveniences_indices < <(awk '{print $1}' <<< "$conveniences")
+    for convenience_idx in "${conveniences_indices[@]}"; do
+        case $convenience_idx in
+            1) change_prompt_color "" ;;
+            2)
+                load_server_data
+                select_instance &&
+                    enter_password "$(get_field 3)"
+                ;;
+            3)
+                load_server_data
+                select_instance &&
+                    escalate_to_superuser "$(get_field 3)"
+                ;;
+        esac
+    done
+fi
